@@ -8362,20 +8362,24 @@ string CompilerGLSL::to_function_name(const TextureFunctionNameArguments &args)
 	auto &imgtype = *args.base.imgtype;
 	VariableID tex = args.base.img;
 
-	// textureLod on sampler2DArrayShadow and samplerCubeShadow does not exist in GLSL for some reason.
-	// To emulate this, we will have to use textureGrad with a constant gradient of 0.
-	// The workaround will assert that the LOD is in fact constant 0, or we cannot emit correct code.
-	// This happens for HLSL SampleCmpLevelZero on Texture2DArray and TextureCube.
+	// textureLod on sampler2DArrayShadow and samplerCubeShadow is not in core GLSL.
+	// For constant LOD 0, emulate with textureGrad and zero gradients (HLSL SampleCmpLevelZero).
+	// For other LODs, GL_NV_gpu_shader5 (OpenGL) or GL_EXT_texture_shadow_lod (Vulkan / ES) adds textureLod.
 	bool workaround_lod_array_shadow_as_grad = false;
 	if (((imgtype.image.arrayed && imgtype.image.dim == Dim2D) || imgtype.image.dim == DimCube) &&
 	    is_depth_image(imgtype, tex) && args.lod && !args.base.is_fetch)
 	{
-		if (!expression_is_constant_null(args.lod))
+		if (expression_is_constant_null(args.lod))
+			workaround_lod_array_shadow_as_grad = true;
+		else if (!options.es && !options.vulkan_semantics)
 		{
-			SPIRV_CROSS_THROW("textureLod on sampler2DArrayShadow is not constant 0.0. This cannot be "
-			                  "expressed in GLSL.");
+			// NV hardware exposes this via GL_NV_gpu_shader5. glslang still expects
+			// GL_EXT_texture_shadow_lod to be enabled for the shadow textureLod overload.
+			require_extension_internal("GL_NV_gpu_shader5");
+			require_extension_internal("GL_EXT_texture_shadow_lod");
 		}
-		workaround_lod_array_shadow_as_grad = true;
+		else
+			require_extension_internal("GL_EXT_texture_shadow_lod");
 	}
 
 	if (args.is_sparse_feedback)
@@ -8506,13 +8510,11 @@ string CompilerGLSL::to_function_args(const TextureFunctionArguments &args, bool
 		coord_expr = bitcast_expression(expected_type, coord_type.basetype, coord_expr);
 	}
 
-	// textureLod on sampler2DArrayShadow and samplerCubeShadow does not exist in GLSL for some reason.
-	// To emulate this, we will have to use textureGrad with a constant gradient of 0.
-	// The workaround will assert that the LOD is in fact constant 0, or we cannot emit correct code.
-	// This happens for HLSL SampleCmpLevelZero on Texture2DArray and TextureCube.
+	// Must match workaround_lod_array_shadow_as_grad in to_function_name().
 	bool workaround_lod_array_shadow_as_grad =
 	    ((imgtype.image.arrayed && imgtype.image.dim == Dim2D) || imgtype.image.dim == DimCube) &&
-	    is_depth_image(imgtype, img) && args.lod != 0 && !args.base.is_fetch;
+	    is_depth_image(imgtype, img) && args.lod != 0 && !args.base.is_fetch &&
+	    expression_is_constant_null(args.lod);
 
 	if (args.dref)
 	{
